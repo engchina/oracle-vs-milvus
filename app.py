@@ -209,13 +209,13 @@ def search_milvus(documents, query, strategy, top_k):
 
                 # 无结果且是最后一次尝试
                 if attempt == max_retries - 1:
-                    gr.Error("Milvus 检索出错")
+                    raise gr.Error("Milvus 检索出错")
                 else:
-                    print(f"第 {attempt + 1} 次检索无结果，正在重试...")
+                    gr.Warning(f"第 {attempt + 1} 次检索无结果，正在重试...")
                     time.sleep(retry_delay)
 
             except Exception as e:
-                print(f"Milvus 第 {attempt + 1} 次检索失败，错误：{str(e)}")
+                gr.Warning(f"Milvus 第 {attempt + 1} 次检索失败，错误：{str(e)}")
                 if attempt == max_retries - 1:
                     raise gr.Error("Milvus 检索出错，重试次数用尽")
                 time.sleep(retry_delay)
