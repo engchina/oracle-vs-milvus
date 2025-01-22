@@ -1,4 +1,5 @@
 import os
+import time  # 需要导入time模块用于重试间隔
 
 import gradio as gr
 import oracledb
@@ -7,9 +8,10 @@ from dotenv import load_dotenv, find_dotenv
 from langchain_community.document_loaders import TextLoader
 from langchain_community.vectorstores import Chroma
 from langchain_community.vectorstores.utils import DistanceStrategy
+from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pymilvus import connections, utility
+from pymilvus import connections, utility, MilvusClient
 
 from my_langchain_community.vectorstores import OracleVS
 from my_langchain_milvus import Milvus
@@ -54,7 +56,6 @@ def search(query, strategy, top_k):
     oracle_result = search_oracle(documents, query, strategy, top_k)
     milvus_result = search_milvus(documents, query, strategy, top_k)
     # chrome_result = search_chrome(documents, query, strategy, top_k)
-    # faiss_result = search_faiss(documents, query, strategy, top_k)
 
     # 初始化一个空字典来存储结果
     result_dict = {
@@ -76,26 +77,6 @@ def search(query, strategy, top_k):
     for res, score in milvus_result:
         result_dict["Milvus Score"].append(score)
         result_dict["Milvus Context"].append(res.page_content)
-
-    # # 添加 Chrome 结果
-    # for res, score in chrome_result:
-    #     result_dict["Chrome Score"].append(score)
-    #     result_dict["Chrome Context"].append(res.page_content)
-    # # # 添加 Faiss 结果
-    # # for res, score in faiss_result:
-    # #     result_dataframe.append({
-    # #         "Database": "Faiss",
-    # #         "Score": score,
-    # #         "Context": res.page_content
-    # #     })
-    #
-    # # 转换为 Pandas DataFrame
-    # result_dataframe = pd.DataFrame(result_dict)
-    #
-    # # 如果需要将结果按行对齐，可以使用 fillna 填充缺失值
-    # result_dataframe = result_dataframe.fillna("")
-    #
-    # return result_dataframe
 
     # 对比 Oracle Context 和 Milvus Context 是否相等
     max_length = max(len(oracle_result), len(milvus_result))  # 获取最大长度
@@ -137,13 +118,6 @@ def search_oracle(documents, query, strategy, top_k):
                 table_name="Documents_EUCLIDEAN",
                 distance_strategy=DistanceStrategy.EUCLIDEAN_DISTANCE,
             )
-            # oracle_vector_store = OracleVS.from_documents(
-            #     documents,
-            #     embeddings,
-            #     client=connection,
-            #     table_name="Documents_DOT",
-            #     distance_strategy=DistanceStrategy.DOT_PRODUCT,
-            # )
 
         results = oracle_vector_store.similarity_search_with_score(
             query=query,
@@ -154,7 +128,7 @@ def search_oracle(documents, query, strategy, top_k):
 
         print("=== 检索到的 Context from Oracle 信息 ===")
         for res, score in results:
-            print(f"* [SIM={score:3f}] {res.page_content} [{res.metadata}]")
+            print(f"* [SIM={score:3f}] {res.page_content}")
 
         return results
 
@@ -167,42 +141,105 @@ def search_milvus(documents, query, strategy, top_k):
     # The easiest way is to use Milvus Lite where everything is stored in a local file.
     # If you have a Milvus server you can use the server URI such as "http://localhost:19530".
     URI = "http://localhost:19530"
-    connections.connect("default", uri=URI)
     # 删除集合
-    collection_name = "langchain_example"
-    if utility.has_collection(collection_name):
-        utility.drop_collection(collection_name)
-        print(f"集合 '{collection_name}' 已删除")
-    else:
-        print(f"集合 '{collection_name}' 不存在")
-
-    # index_params = {
-    #     'metric_type': 'COSINE',
-    #     'index_type': "FLAT",
-    # }
-    # search_params = {
-    #     "metric_type": "COSINE",
-    # }
 
     if strategy == "COSINE":
-        milvus_store = Milvus.from_documents(
-            documents,
-            embeddings,
-            collection_name="langchain_example",
-            connection_args={"uri": URI},
-            # index_params=index_params,
-            # search_params=search_params
+        collection_name = "langchain_cosine_example"
+
+        # 初始化客户端（自动创建本地数据库文件）
+        client = MilvusClient(uri=URI)
+        if client.has_collection(collection_name):
+            client.drop_collection(collection_name)
+        client.create_collection(
+            collection_name=collection_name,
+            dimension=1024,
+            metric_type="COSINE"  # 显式指定余弦相似度（默认值，此处明确展示）
         )
-        results = milvus_store.similarity_search_with_score(
-            query=query,
-            k=top_k,
-            # param=search_params,
-        )
+
+        docs = [document.page_content for document in documents]
+        # 生成文档向量（使用正确的方法）
+        vectors = embeddings.embed_documents(docs)  # 注意这里是 embed_documents
+        print(f"{len(vectors[0])=}")
+
+        # 构建插入数据（包含元数据标签）
+        data = [{
+            "id": i,
+            "vector": vec,
+            "text": doc,
+        } for i, (doc, vec) in enumerate(zip(docs, vectors))]
+
+        # 步骤3：插入数据到集合
+        insert_result = client.insert(collection_name, data)
+        print(f"插入成功，插入数量：{insert_result['insert_count']}")
+
+        query_vector = embeddings.embed_query(query)  # 注意这里是 embed_query
+        print(f"{len(query_vector)=}")
+
+        search_params = {
+            "metric_type": "COSINE",
+        }
+
+        max_retries = 3
+        retry_delay = 1  # 重试间隔时间（秒）
+        results = []
+
+        for attempt in range(max_retries):
+            try:
+                # 执行向量搜索
+                searched_results = client.search(
+                    collection_name=collection_name,
+                    data=[query_vector],
+                    limit=top_k,
+                    output_fields=["text"],  # 返回文本
+                    search_params=search_params,
+                    timeout=120,
+                )
+
+                # 构造results
+                results = []
+                for hit in searched_results[0]:
+                    score = 1.0 - hit['distance']
+                    text_content = hit['entity']['text']
+                    res = Document(page_content=text_content)
+                    results.append((res, score))
+
+                # 如果有结果则退出重试循环
+                if len(results) > 0:
+                    break
+
+                # 无结果且是最后一次尝试
+                if attempt == max_retries - 1:
+                    gr.Error("Milvus 检索出错")
+                else:
+                    print(f"第 {attempt + 1} 次检索无结果，正在重试...")
+                    time.sleep(retry_delay)
+
+            except Exception as e:
+                print(f"Milvus 第 {attempt + 1} 次检索失败，错误：{str(e)}")
+                if attempt == max_retries - 1:
+                    raise gr.Error("Milvus 检索出错，重试次数用尽")
+                time.sleep(retry_delay)
+
+        # 最终结果检查
+        if not results:
+            raise gr.Error("Milvus 检索出错")
+
+        print(f"{len(results)=}")
+
     else:
+        collection_name = "langchain_l2_example"
+
+        connections.connect("default", uri=URI)
+        if utility.has_collection(collection_name):
+            utility.drop_collection(collection_name)
+            print(f"集合 '{collection_name}' 已删除")
+        else:
+            print(f"集合 '{collection_name}' 不存在")
+
         milvus_store = Milvus.from_documents(
             documents,
             embeddings,
-            collection_name="langchain_example",
+            collection_name=collection_name,
             connection_args={"uri": URI},
         )
         results = milvus_store.similarity_search_with_score(
@@ -212,7 +249,7 @@ def search_milvus(documents, query, strategy, top_k):
 
     print("=== 检索到的 Context from Milvus 信息 ===")
     for res, score in results:
-        print(f"* [SIM={score:3f}] {res.page_content} [{res.metadata}]")
+        print(f"* [SIM={score:3f}] {res.page_content}")
 
     return results
 
@@ -251,44 +288,6 @@ def search_chrome(documents, query, strategy, top_k):
         print(f"* [SIM={score:3f}] {res.page_content} [{res.metadata}]")
 
     return results
-
-
-# def search_faiss(documents, query, strategy, top_k):
-#     faiss_store = FAISS.from_documents(
-#         documents,
-#         embeddings,
-#     )
-#     if strategy == "COSINE":
-#         # 获取查询的嵌入向量
-#         query_embedding = embeddings.embed_query(query)
-#
-#         # 对查询向量进行 L2 归一化（余弦相似度的关键步骤）
-#         query_embedding = np.array(query_embedding, dtype=np.float32)
-#         normalize_L2(query_embedding)
-#
-#         # 对 FAISS 索引中的所有向量进行 L2 归一化
-#         faiss_store.index = faiss.IndexFlatIP(faiss_store.index.d)  # 使用内积（IP）代替 L2
-#         normalize_L2(faiss_store.index.reconstruct_n(0, faiss_store.index.ntotal))
-#
-#         # 使用内积进行相似度搜索（归一化后的内积等价于余弦相似度）
-#         distances, indices = faiss_store.index.search(np.array([query_embedding]), top_k)
-#
-#         # 获取结果
-#         results = []
-#         for idx, score in zip(indices[0], distances[0]):
-#             doc = faiss_store.index.reconstruct(idx)
-#             results.append((doc, score))
-#     else:
-#         results = faiss_store.similarity_search_with_score(
-#             query=query,
-#             k=top_k,
-#         )
-#
-#     print("=== 检索到的 Context from Faiss 信息 ===")
-#     for res, score in results:
-#         print(f"* [SIM={score:3f}] {res.page_content} [{res.metadata}]")
-#
-#     return results
 
 
 with gr.Blocks() as app:
