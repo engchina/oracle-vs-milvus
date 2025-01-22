@@ -1,0 +1,229 @@
+快速入门 Milvus Lite
+Open In Colab GitHub Repository
+
+向量是神经网络模型的输出数据格式，可以有效地对信息进行编码，在知识库、语义搜索、检索增强生成（RAG）等人工智能应用中发挥着举足轻重的作用。
+
+Milvus 是一个开源的向量数据库，适合各种规模的人工智能应用，从在 Jupyter notebook 中运行一个演示聊天机器人，到构建服务数十亿用户的网络规模搜索。在本指南中，我们将指导您如何在几分钟内本地设置 Milvus，并使用 Python 客户端库生成、存储和搜索向量。
+
+安装 Milvus
+在本指南中，我们使用 Milvus Lite，它是pymilvus 中包含的一个 python 库，可以嵌入到客户端应用程序中。Milvus 还支持在Docker和Kubernetes上部署，适用于生产用例。
+
+开始之前，请确保本地环境中有 Python 3.8+ 可用。安装pymilvus ，其中包含 python 客户端库和 Milvus Lite：
+
+$ pip install -U pymilvus
+
+如果使用的是 Google Colab，要启用刚刚安装的依赖项，可能需要重启运行时。(点击屏幕上方的 "运行时 "菜单，从下拉菜单中选择 "重启会话"）。
+
+设置向量数据库
+要创建本地的 Milvus 向量数据库，只需实例化一个MilvusClient ，指定一个存储所有数据的文件名，如 "milvus_demo.db"。
+
+from pymilvus import MilvusClient
+
+client = MilvusClient("milvus_demo.db")
+
+创建 Collections
+在 Milvus 中，我们需要一个 Collections 来存储向量及其相关元数据。你可以把它想象成传统 SQL 数据库中的表格。创建 Collections 时，可以定义 Schema 和索引参数来配置向量规格，如维度、索引类型和远距离度量。此外，还有一些复杂的概念来优化索引以提高向量搜索性能。现在，我们只关注基础知识，并尽可能使用默认设置。至少，你只需要设置 Collections 的名称和向量场的维度。
+
+if client.has_collection(collection_name="demo_collection"):
+    client.drop_collection(collection_name="demo_collection")
+client.create_collection(
+    collection_name="demo_collection",
+    dimension=768,  # The vectors we will use in this demo has 768 dimensions
+)
+
+在上述设置中
+
+主键和向量字段使用默认名称（"id "和 "vector"）。
+度量类型（向量距离定义）设置为默认值（COSINE）。
+主键字段接受整数，且不自动递增（即不使用自动 ID 功能）。 或者，您也可以按照此说明正式定义 Collections 的 Schema。
+准备数据
+在本指南中，我们使用向量对文本进行语义搜索。我们需要通过下载 embedding 模型为文本生成向量。使用pymilvus[model] 库中的实用功能可以轻松完成这项工作。
+
+用向量表示文本
+首先，安装模型库。该软件包包含 PyTorch 等基本 ML 工具。如果您的本地环境从未安装过 PyTorch，则软件包下载可能需要一些时间。
+
+$ pip install "pymilvus[model]"
+
+用默认模型生成向量 Embeddings。Milvus 希望数据以字典列表的形式插入，每个字典代表一条数据记录，称为实体。
+
+from pymilvus import model
+
+# If connection to https://huggingface.co/ failed, uncomment the following path
+# import os
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+# This will download a small embedding model "paraphrase-albert-small-v2" (~50MB).
+embedding_fn = model.DefaultEmbeddingFunction()
+
+# Text strings to search from.
+docs = [
+    "Artificial intelligence was founded as an academic discipline in 1956.",
+    "Alan Turing was the first person to conduct substantial research in AI.",
+    "Born in Maida Vale, London, Turing was raised in southern England.",
+]
+
+vectors = embedding_fn.encode_documents(docs)
+# The output vector has 768 dimensions, matching the collection that we just created.
+print("Dim:", embedding_fn.dim, vectors[0].shape)  # Dim: 768 (768,)
+
+# Each entity has id, vector representation, raw text, and a subject label that we use
+# to demo metadata filtering later.
+data = [
+    {"id": i, "vector": vectors[i], "text": docs[i], "subject": "history"}
+    for i in range(len(vectors))
+]
+
+print("Data has", len(data), "entities, each with fields: ", data[0].keys())
+print("Vector dim:", len(data[0]["vector"]))
+
+Dim: 768 (768,)
+Data has 3 entities, each with fields:  dict_keys(['id', 'vector', 'text', 'subject'])
+Vector dim: 768
+
+[另一种方法] 使用随机向量的假表示法
+如果由于网络问题无法下载模型，作为一种走马观花的方法，你可以使用随机向量来表示文本，仍然可以完成示例。只需注意，由于向量是假向量，搜索结果不会反映语义相似性。
+
+import random
+
+# Text strings to search from.
+docs = [
+    "Artificial intelligence was founded as an academic discipline in 1956.",
+    "Alan Turing was the first person to conduct substantial research in AI.",
+    "Born in Maida Vale, London, Turing was raised in southern England.",
+]
+# Use fake representation with random vectors (768 dimension).
+vectors = [[random.uniform(-1, 1) for _ in range(768)] for _ in docs]
+data = [
+    {"id": i, "vector": vectors[i], "text": docs[i], "subject": "history"}
+    for i in range(len(vectors))
+]
+
+print("Data has", len(data), "entities, each with fields: ", data[0].keys())
+print("Vector dim:", len(data[0]["vector"]))
+
+Data has 3 entities, each with fields:  dict_keys(['id', 'vector', 'text', 'subject'])
+Vector dim: 768
+
+插入数据
+让我们把数据插入 Collections：
+
+res = client.insert(collection_name="demo_collection", data=data)
+
+print(res)
+
+{'insert_count': 3, 'ids': [0, 1, 2], 'cost': 0}
+
+语义搜索
+现在我们可以通过将搜索查询文本表示为向量来进行语义搜索，并在 Milvus 上进行向量相似性搜索。
+
+向量搜索
+Milvus 可同时接受一个或多个向量搜索请求。query_vectors 变量的值是一个向量列表，其中每个向量都是一个浮点数数组。
+
+query_vectors = embedding_fn.encode_queries(["Who is Alan Turing?"])
+# If you don't have the embedding function you can use a fake vector to finish the demo:
+# query_vectors = [ [ random.uniform(-1, 1) for _ in range(768) ] ]
+
+res = client.search(
+    collection_name="demo_collection",  # target collection
+    data=query_vectors,  # query vectors
+    limit=2,  # number of returned entities
+    output_fields=["text", "subject"],  # specifies fields to be returned
+)
+
+print(res)
+
+data: ["[{'id': 2, 'distance': 0.5859944820404053, 'entity': {'text': 'Born in Maida Vale, London, Turing was raised in southern England.', 'subject': 'history'}}, {'id': 1, 'distance': 0.5118255615234375, 'entity': {'text': 'Alan Turing was the first person to conduct substantial research in AI.', 'subject': 'history'}}]"] , extra_info: {'cost': 0}
+
+输出结果是一个结果列表，每个结果映射到一个向量搜索查询。每个查询都包含一个结果列表，其中每个结果都包含实体主键、到查询向量的距离以及指定output_fields 的实体详细信息。
+
+带元数据过滤的向量搜索
+你还可以在考虑元数据值（在 Milvus 中称为 "标量 "字段，因为标量指的是非向量数据）的同时进行向量搜索。这可以通过指定特定条件的过滤表达式来实现。让我们在下面的示例中看看如何使用subject 字段进行搜索和筛选。
+
+# Insert more docs in another subject.
+docs = [
+    "Machine learning has been used for drug design.",
+    "Computational synthesis with AI algorithms predicts molecular properties.",
+    "DDR1 is involved in cancers and fibrosis.",
+]
+vectors = embedding_fn.encode_documents(docs)
+data = [
+    {"id": 3 + i, "vector": vectors[i], "text": docs[i], "subject": "biology"}
+    for i in range(len(vectors))
+]
+
+client.insert(collection_name="demo_collection", data=data)
+
+# This will exclude any text in "history" subject despite close to the query vector.
+res = client.search(
+    collection_name="demo_collection",
+    data=embedding_fn.encode_queries(["tell me AI related information"]),
+    filter="subject == 'biology'",
+    limit=2,
+    output_fields=["text", "subject"],
+)
+
+print(res)
+
+data: ["[{'id': 4, 'distance': 0.27030569314956665, 'entity': {'text': 'Computational synthesis with AI algorithms predicts molecular properties.', 'subject': 'biology'}}, {'id': 3, 'distance': 0.16425910592079163, 'entity': {'text': 'Machine learning has been used for drug design.', 'subject': 'biology'}}]"] , extra_info: {'cost': 0}
+
+默认情况下，标量字段不编制索引。如果需要在大型数据集中执行元数据过滤搜索，可以考虑使用固定 Schema，同时打开索引以提高搜索性能。
+
+除了向量搜索，还可以执行其他类型的搜索：
+
+查询
+查询()是一种操作符，用于检索与某个条件（如过滤表达式或与某些 id 匹配）相匹配的所有实体。
+
+例如，检索标量字段具有特定值的所有实体：
+
+res = client.query(
+    collection_name="demo_collection",
+    filter="subject == 'history'",
+    output_fields=["text", "subject"],
+)
+
+通过主键直接检索实体
+
+res = client.query(
+    collection_name="demo_collection",
+    ids=[0, 2],
+    output_fields=["vector", "text", "subject"],
+)
+
+删除实体
+如果想清除数据，可以删除指定主键的实体，或删除与特定过滤表达式匹配的所有实体。
+
+# Delete entities by primary key
+res = client.delete(collection_name="demo_collection", ids=[0, 2])
+
+print(res)
+
+# Delete entities by a filter expression
+res = client.delete(
+    collection_name="demo_collection",
+    filter="subject == 'biology'",
+)
+
+print(res)
+
+[]
+[]
+
+加载现有数据
+由于 Milvus Lite 的所有数据都存储在本地文件中，因此即使在程序终止后，你也可以通过创建一个带有现有文件的MilvusClient ，将所有数据加载到内存中。例如，这将恢复 "milvus_demo.db "文件中的 Collections，并继续向其中写入数据。
+
+from pymilvus import MilvusClient
+
+client = MilvusClient("milvus_demo.db")
+
+删除 Collections
+如果想删除某个 Collections 中的所有数据，可以通过以下方法丢弃该 Collections
+
+# Drop collection
+client.drop_collection(collection_name="demo_collection")
+
+了解更多
+Milvus Lite 非常适合从本地 python 程序入门。如果你有大规模数据或想在生产中使用 Milvus，你可以了解在Docker和Kubernetes 上部署 Milvus。Milvus 的所有部署模式都共享相同的 API，因此如果转向其他部署模式，你的客户端代码不需要做太大改动。只需指定部署在任何地方的 Milvus 服务器的URI 和令牌即可：
+
+client = MilvusClient(uri="http://localhost:19530", token="root:Milvus")
+
+Milvus 提供 REST 和 gRPC API，并提供Python、Java、Go、C# 和Node.js 等语言的客户端库。
