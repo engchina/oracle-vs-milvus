@@ -5,6 +5,7 @@ import gradio as gr
 import oracledb
 import pandas as pd
 from dotenv import load_dotenv, find_dotenv
+from gradio.themes import GoogleFont
 from langchain_community.document_loaders import TextLoader
 from langchain_community.vectorstores import Chroma
 from langchain_community.vectorstores.utils import DistanceStrategy
@@ -290,7 +291,31 @@ def search_chrome(documents, query, strategy, top_k):
     return results
 
 
-with gr.Blocks() as app:
+# 定义字体配置
+FONT_FAMILY = [
+    "Noto Sans JP",  # 日文字体
+    "Noto Sans SC",  # 简体中文字体
+    "Roboto",  # 拉丁字母字体
+    "sans-serif"  # 系统默认无衬线字体
+]
+
+# 定义全局CSS样式
+CUSTOM_CSS = f"""
+* {{
+    font-family: {", ".join(FONT_FAMILY)} !important; /* 强制全局字体 */
+}}
+
+.md > h2 {{
+    text-align: center;
+}}
+"""
+
+# 创建GoogleFont对象列表
+GOOGLE_FONTS = [GoogleFont(name=font) for font in FONT_FAMILY if font != "sans-serif"]
+
+# 构建Gradio应用
+with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Default(font=GOOGLE_FONTS)) as app:
+    gr.Markdown("## Oracle vs Milvus Vector Search")
     with gr.Row():
         with gr.Column():
             query_text = gr.Textbox(label="Query")
